@@ -1,0 +1,165 @@
+# name: test/sql/llm_prices.test
+# description: llm_cost, llm_model_id, llm_prices() and llm_prices_version()
+# group: [llm_prices]
+
+# The functions do not exist before the extension is loaded.
+statement error
+SELECT llm_cost('gpt-4o', 1, 1);
+----
+Catalog Error
+
+require llm_prices
+
+# Every function registers under the extension's category.
+query I
+SELECT count(DISTINCT function_name) FROM duckdb_functions() WHERE function_name IN ('llm_cost', 'llm_model_id', 'llm_prices', 'llm_prices_version');
+----
+4
+
+# gpt-4o: $2.50 input, $10 output per 1M tokens.
+query I
+SELECT abs(llm_cost('gpt-4o', 1200, 350) - 0.0065) < 1e-12;
+----
+true
+
+query I
+SELECT typeof(llm_cost('gpt-4o', 1200, 350));
+----
+DOUBLE
+
+# Cache reads bill at the cache-read price; the undated id finds the dated row.
+query I
+SELECT abs(llm_cost('claude-sonnet-4-5', 2000, 400, 18000) - 0.0174) < 1e-12;
+----
+true
+
+# Named arguments: cache writes, Batch API, provider.
+query I
+SELECT abs(llm_cost('claude-sonnet-4-5', 0, 0, cache_write_5m_tokens := 10000) - 0.0375) < 1e-12;
+----
+true
+
+query I
+SELECT abs(llm_cost('claude-sonnet-4-5', 0, 0, cache_write_1h_tokens := 10000) - 0.06) < 1e-12;
+----
+true
+
+query I
+SELECT abs(llm_cost('claude-haiku-4-5', 10000, 1000, 90000, batch := true) - 0.012) < 1e-12;
+----
+true
+
+query I
+SELECT llm_cost('openai/gpt-oss-120b', 1000000, 0, provider := 'groq') IS NOT NULL;
+----
+true
+
+# Long-context prices apply above the threshold (claude-haiku-5-5: 100k tokens).
+query II
+SELECT abs(llm_cost('claude-haiku-5-5', 50000, 1000) - 0.0055) < 1e-12,
+       abs(llm_cost('claude-haiku-5-5', 200000, 1000) - 0.1025) < 1e-12;
+----
+true	true
+
+# Provider prefixes, Bedrock ids and aliases resolve.
+query III
+SELECT llm_model_id('us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
+       llm_model_id('anthropic/claude-haiku-4-5'),
+       llm_model_id('deepseek-chat');
+----
+claude-sonnet-4-5-20250929	claude-haiku-4-5	deepseek-flash
+
+query I
+SELECT llm_cost('anthropic/claude-sonnet-4-5', 1000, 0) = llm_cost('claude-sonnet-4-5-20250929', 1000, 0);
+----
+true
+
+# Unknown models and NULL inputs give NULL.
+query III
+SELECT llm_cost('not-a-model', 10, 10), llm_cost(NULL, 10, 10), llm_model_id('not-a-model');
+----
+NULL	NULL	NULL
+
+query I
+SELECT count(llm_cost(m, i, o)) FROM (VALUES ('gpt-4o', 10, 10), (NULL, 10, 10), ('gpt-4o', NULL, 10), ('nope', 1, 1)) t(m, i, o);
+----
+1
+
+# OpenAI rows price cache writes on 30m/12h lifetimes, not 5m.
+query I
+SELECT llm_cost('gpt-6-sol', 1, 1, cache_write_5m_tokens := 1);
+----
+NULL
+
+# Bad arguments are errors, not silent NULLs.
+statement error
+SELECT llm_cost('gpt-4o', -1, 10);
+----
+input_tokens must be 0 or more
+
+statement error
+SELECT llm_cost('gpt-4o', 1, 1, provider := 'acme');
+----
+unknown provider 'acme'
+
+statement error
+SELECT llm_cost('gpt-4o');
+----
+Binder Error
+
+# Columns from a table, spanning several chunks, with a sequence vector input.
+query I
+SELECT abs(sum(llm_cost('gpt-4o', i, 0)) - 11.24625) < 1e-9 FROM range(3000) t(i);
+----
+true
+
+# Two models interleaved row by row: gpt-4o ($2.50/$10) on even rows, claude-haiku-4-5 ($1/$5) on odd rows.
+query II
+SELECT count(llm_cost(m, i, 10)), abs(sum(llm_cost(m, i, 10)) - 22.24375) < 1e-9
+FROM (SELECT CASE WHEN i % 2 = 0 THEN 'gpt-4o' ELSE 'claude-haiku-4-5' END AS m, i FROM range(5000) t(i));
+----
+5000	true
+
+# The price table.
+query I
+SELECT count(*) >= 140 FROM llm_prices();
+----
+true
+
+query I
+SELECT count(*) FROM (SELECT provider, model FROM llm_prices() GROUP BY ALL HAVING count(*) > 1);
+----
+0
+
+query IIIIII
+SELECT provider, input, output, cache_read, list_contains(aliases, 'claude-opus-4-5-20251101'), typeof(checked)
+FROM llm_prices() WHERE model = 'claude-opus-4-5';
+----
+anthropic	5.0	25.0	0.5	true	DATE
+
+query III
+SELECT cache_write_30m, cache_write_12h, long_context_threshold FROM llm_prices() WHERE model = 'gpt-6-sol';
+----
+2.5	5.0	272000
+
+query I
+SELECT count(*) FROM llm_prices() WHERE source_url NOT LIKE 'https://%';
+----
+0
+
+# Every listed chat row with input and output prices is priced by llm_cost.
+query I
+SELECT count(*) FROM llm_prices() WHERE input IS NOT NULL AND output IS NOT NULL AND llm_cost(model, 1000, 1000, provider := provider) IS NULL;
+----
+0
+
+# The data date.
+query I
+SELECT llm_prices_version() SIMILAR TO '[0-9]{4}-[0-9]{2}-[0-9]{2}';
+----
+true
+
+query I
+SELECT max(checked) <= llm_prices_version()::DATE FROM llm_prices();
+----
+true

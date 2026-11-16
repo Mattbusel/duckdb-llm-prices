@@ -1,0 +1,15 @@
+[package]
+name = "duckdb_llm_prices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "llm_prices"
+crate-type = ["cdylib"]
+
+[dependencies]
+duckdb-neo.workspace = true
+llm_prices_duckdb.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "llm_prices_duckdb"
+description = "DuckDB functions that price LLM token usage offline from the llm-prices table"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+duckdb-neo.workspace = true
+prices.workspace = true
